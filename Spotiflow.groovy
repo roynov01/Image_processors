@@ -16,17 +16,41 @@
  * will only run on the selected annotations.
  */
 
+import qupath.lib.roi.ROIs
+import qupath.lib.objects.PathObjects
+import qupath.lib.regions.ImagePlane
+import org.locationtech.jts.geom.Geometry
+import org.locationtech.jts.geom.GeometryFactory
+import qupath.imagej.tools.IJTools
+import qupath.lib.regions.RegionRequest
+import qupath.lib.io.PathIO
+import qupath.ext.biop.spotiflow.Spotiflow
+import ij.*
+import ij.measure.Measurements
+import ij.process.ImageStatistics
+import java.util.ArrayList
+// Logging imports removed - let all output show naturally
+
 // If you have trained a custom model, specify the model directory as a File in setModelDir()
 // If you want to use any other pre-trained models, specify its name in setPretrainedModelName()
 // -> List of all pre-trained models : https://weigertlab.github.io/spotiflow/pretrained.html
-def channels = ["Cy5", "TMR"]
-def runTarget = 'Current Image'   // 'Current Image' or 'Whole Project'
-def detectionScope = 'Specific annotation classes'  // 'Whole image', 'All annotations', or 'Specific annotation classes'
-def annotationClassNames = ['Cholangyocytes']  // Used only when detectionScope == 'Specific annotation classes'
-def distanceAnnotationClassName = 'Cholangyocytes'  // Distance is computed relative to annotations with this class name
-def outputCsvPath = 'X:/roy/snRNAseq_retention/analysis/Qupath/cholangyocytes/results/temp.csv'  // CSV export path for detected spots
-def measureChannelIntensity = true  // Measure intensity for all channels at each spot
-def save_detections = true  // If false, detections are removed before saving image data
+def configValue = { String name, value -> binding.hasVariable(name) ? binding.getVariable(name) : value }
+
+def resolveImageName = { imageData, entry = null ->
+        def serverPath = imageData?.getServer()?.getPath()?.toString()
+        def serverName = serverPath != null ? new File(serverPath).getName() : null
+        serverName ?: entry?.getImageName() ?: imageData?.getServer()?.getMetadata()?.getName() ?: 'image'
+}
+
+def channels = configValue('channels', ["Cy5", "TMR"])
+def runTarget = configValue('runTarget', 'Current Image')   // 'Current Image' or 'Whole Project'
+def detectionScope = configValue('detectionScope', 'Specific annotation classes')  // 'Whole image', 'All annotations', or 'Specific annotation classes'
+def annotationClassNames = configValue('annotationClassNames', ['Cholangyocytes'])  // Used only when detectionScope == 'Specific annotation classes'
+def distanceAnnotationClassName = configValue('distanceAnnotationClassName', 'Cholangyocytes')  // Distance is computed relative to annotations with this class name
+def outputCsvPath = configValue('outputCsvPath', 'X:/roy/snRNAseq_retention/analysis/Qupath/cholangyocytes/results/temp.csv')  // CSV export path for detected spots
+def measureChannelIntensity = configValue('measureChannelIntensity', true)  // Measure intensity for all channels at each spot
+def save_detections = configValue('save_detections', true)  // If false, detections are removed before saving image data
+// Spotiflow output suppression removed - output now shows naturally
 
 
 Date start = new Date()
@@ -56,19 +80,6 @@ def spotiflow = Spotiflow.builder()
 
 // ******************** SCRIPT STARTS HERE - you usually don't need to change anything below this line **************************
 
-import qupath.lib.roi.ROIs
-import qupath.lib.objects.PathObjects
-import qupath.lib.regions.ImagePlane
-import org.locationtech.jts.geom.Geometry
-import org.locationtech.jts.geom.GeometryFactory
-import qupath.imagej.tools.IJTools
-import qupath.lib.regions.RegionRequest
-import qupath.lib.io.PathIO
-import ij.*
-import ij.measure.Measurements
-import ij.process.ImageStatistics
-import java.util.ArrayList
-
 def geometryFactory = new GeometryFactory()
 
 def validRunTargets = ['Current Image', 'Whole Project']
@@ -84,8 +95,8 @@ if (!validScopes.contains(detectionScope)) {
 def classNames = (annotationClassNames ?: []).collect { it.toString().trim() }.findAll { it }
 // Use two forms: a variable-safe lowercase name for measurements/properties,
 // and a human-readable header form that preserves the annotation class name.
-def distanceVarBase = "signed_distance_to_${distanceAnnotationClassName.replaceAll('\\s+','_').toLowerCase()}"
-def distanceHeaderBase = "signed_distance_to_${distanceAnnotationClassName.replaceAll('\\s+','_')}"
+def distanceVarBase = "distance_to_${distanceAnnotationClassName.replaceAll('\\s+','_').toLowerCase()}"
+def distanceHeaderBase = "distance_to_${distanceAnnotationClassName.replaceAll('\\s+','_')}"
 
 def getImageIdentifier = { imageData, entry = null ->
         entry?.getID() ?: imageData.getServer().getPath()
@@ -354,26 +365,24 @@ def writeCsv = { rows, csvPath ->
                 parent.mkdirs()
 
         outputFile.withPrintWriter('UTF-8') { writer ->
-                        if (rows.isEmpty()) {
-                                writer.println(['image_name','channel','annotation_id','annotation_classification','x','y','x_um','y_um', distanceHeaderBase + '_px', distanceHeaderBase + '_um'].join(','))
-                                return
-                        }
-
+                def finalHeaders = ['image_name','channel','annotation_id','annotation_classification','x','y','x_um','y_um', distanceHeaderBase + '_px', distanceHeaderBase + '_um']
+                if (!rows.isEmpty()) {
                         def headers = rows.collectMany { it.keySet() }.unique()
-                        // ensure stable header order if present
-                        def preferred = ['image_name','channel','annotation_id','annotation_classification','x','y','x_um','y_um', distanceHeaderBase + '_px', distanceHeaderBase + '_um']
-                        def finalHeaders = preferred.findAll { headers.contains(it) } + (headers - preferred)
-                        writer.println finalHeaders.join(',')
+                        finalHeaders = finalHeaders.findAll { headers.contains(it) } + (headers - finalHeaders)
+                }
+
+                writer.println finalHeaders.join(',')
                 rows.each { row ->
-                                writer.println finalHeaders.collect { header ->
-                                        def value = row[header]
+                        def values = finalHeaders.collect { header ->
+                                def value = row.containsKey(header) ? row.get(header) : null
                                 if (value == null)
                                         return ''
                                 def text = value.toString()
                                 if (text.contains(',') || text.contains('"') || text.contains('\n'))
                                         return '"' + text.replace('"', '""') + '"'
                                 return text
-                                }.join(',')
+                        }
+                        writer.println values.join(',')
                 }
         }
 }
@@ -419,8 +428,11 @@ if (runTarget == 'Current Image') {
         }
         spotiflow.detectObjects(imageData, getImageIdentifier(imageData, getProjectEntry()), pathObjects)
 
-        def imageName = getProjectEntry() != null ? getProjectEntry().getImageName() : imageData.getServer().getMetadata().getName()
+        def imageName = resolveImageName(imageData, getProjectEntry())
+        def rowsBeforeAppend = csvRows.size()
         appendSpotRows(imageData, imageName, csvRows)
+        def spotsFound = csvRows.size() - rowsBeforeAppend
+        println "[SPOTS FOUND] ${spotsFound} spots in ${imageName}"
         finalizeImageData(imageData)
 } else { // Whole project
         def project = getProject()
@@ -434,13 +446,16 @@ if (runTarget == 'Current Image') {
                 }
                 spotiflow.detectObjects(imageData, entry.getID(), pathObjects)
 
-                appendSpotRows(imageData, entry.getImageName(), csvRows)
+                def rowsBeforeAppend = csvRows.size()
+                appendSpotRows(imageData, resolveImageName(imageData, entry), csvRows)
+                def spotsFound = csvRows.size() - rowsBeforeAppend
+                println "[SPOTS FOUND] ${spotsFound} spots in ${entry.getImageName()}"
                 finalizeImageData(imageData)
         }
 }
 
 writeCsv(csvRows, outputCsvPath)
-println "CSV exported to ${outputCsvPath}"
+println "[SAVING] ${outputCsvPath}"
 
 // You could do some post-processing here, e.g. to remove objects that are too small, but it is usually better to
 // do this in a separate script so you can see the results before deleting anything.
@@ -450,7 +465,4 @@ long milliseconds = stop.getTime() - start.getTime()
 int seconds = (int) (milliseconds / 1000) % 60 ;
 int minutes = (int) ((milliseconds / (1000*60)) % 60);
 int hours   = (int) ((milliseconds / (1000*60*60)) % 24);
-println "Processing done in " + hours + " hour(s) " + minutes + " minute(s) " + seconds + " second(s)"
-println 'Spotiflow detection script done'
-
-import qupath.ext.biop.spotiflow.Spotiflow
+println "Spotiflow completed in " + hours + "h " + minutes + "m " + seconds + "s"
